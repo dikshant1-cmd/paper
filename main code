@@ -1,0 +1,127 @@
+"""
+Actual vs Predicted Tp — Literature Validation Report
+=======================================================
+Paste this into a single Google Colab cell and run it.
+Only needs numpy / pandas / scikit-learn / matplotlib, which are all
+preinstalled on Colab — no other setup required.
+
+It takes the raw EGNN / Ridge predictions already produced by the
+full pipeline's validate_literature() run (hardcoded below from the
+actual printed output) and builds:
+  1) a clean actual-vs-predicted table (raw + LOOCV-calibrated),
+  2) a scatter plot of predicted vs actual with a y=x reference line,
+  3) a bar chart of per-sample calibrated error.
+
+If you want this to run automatically from a live pipeline instead of
+pasted numbers, drop your own values into `lit_tp` / `egnn_raw` /
+`ridge_raw` below (same order) and everything else just works.
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from sklearn.linear_model import LinearRegression
+
+# ── 1. Data (from the literature validation run) ────────────────────
+names = ["PU0B_A", "PU1BUH", "PU3BUH", "PU5BUH", "PU1CD", "PU3CD",
+          "PU5CD", "PU0B_B", "PU2B", "PU4B", "PU6B"]
+
+lit_tp   = np.array([384, 391, 398, 404, 389, 395, 401, 381, 396, 404, 411], dtype=float)
+egnn_raw = np.array([431.9, 443.5, 472.9, 499.2, 423.6, 414.6, 408.8,
+                      431.9, 457.9, 486.9, 510.5], dtype=float)
+egnn_std = np.array([6.6, 6.3, 6.3, 6.7, 6.0, 5.6, 5.4, 6.6, 6.2, 6.5, 7.0], dtype=float)
+ridge_raw = np.array([444.5, 454.3, 473.9, 493.6, 437.4, 423.2, 409.0,
+                       444.5, 464.1, 483.7, 503.4], dtype=float)
+
+
+# ── 2. Leave-one-out affine calibration (the honest number) ─────────
+def loocv_affine_calibration(x, y):
+    x = np.asarray(x, dtype=float).reshape(-1, 1)
+    y = np.asarray(y, dtype=float)
+    n = len(y)
+    loo_preds = np.zeros(n)
+    for i in range(n):
+        mask = np.ones(n, dtype=bool); mask[i] = False
+        reg_i = LinearRegression().fit(x[mask], y[mask])
+        loo_preds[i] = reg_i.predict(x[i].reshape(1, -1))[0]
+    return loo_preds
+
+egnn_cal = loocv_affine_calibration(egnn_raw, lit_tp)
+
+err_abs = egnn_cal - lit_tp
+err_pct = 100 * np.abs(err_abs) / lit_tp
+
+# ── 3. Build the table ───────────────────────────────────────────────
+df = pd.DataFrame({
+    "Sample": names,
+    "Actual Tp (°C)": lit_tp,
+    "EGNN raw (°C)": egnn_raw,
+    "EGNN raw ±σ": egnn_std,
+    "EGNN LOOCV-calibrated (°C)": np.round(egnn_cal, 1),
+    "Ridge raw (°C)": ridge_raw,
+    "Calibrated error (°C)": np.round(err_abs, 1),
+    "Calibrated error (%)": np.round(err_pct, 2),
+})
+
+pd.set_option("display.width", 140)
+pd.set_option("display.max_columns", None)
+print("=" * 100)
+print(" ACTUAL vs PREDICTED — Tp (peak decomposition temperature)")
+print("=" * 100)
+print(df.to_string(index=False))
+
+mae = np.mean(np.abs(err_abs))
+rmse = np.sqrt(np.mean(err_abs ** 2))
+mape = np.mean(err_pct)
+hit10 = np.mean(np.abs(err_abs) <= 10) * 100
+
+print("\n" + "-" * 100)
+print(f" LOOCV MAE:  {mae:.2f} °C")
+print(f" LOOCV RMSE: {rmse:.2f} °C")
+print(f" Relative-error accuracy (100 - MAPE): {100 - mape:.1f}%")
+print(f" Within ±10 °C: {hit10:.1f}% of samples ({int(round(hit10/100*len(names)))}/{len(names)})")
+print("-" * 100)
+
+worst_idx = np.argmax(np.abs(err_abs))
+print(f" Largest miss: {names[worst_idx]}  "
+      f"(actual={lit_tp[worst_idx]:.1f}, predicted={egnn_cal[worst_idx]:.1f}, "
+      f"error={err_abs[worst_idx]:+.1f} °C)")
+
+# ── 4. Plots ──────────────────────────────────────────────────────────
+fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+
+# (a) Scatter: predicted vs actual
+ax = axes[0]
+ax.errorbar(lit_tp, egnn_raw, yerr=egnn_std, fmt="o", color="tab:red",
+            alpha=0.5, label="EGNN raw (uncalibrated)", capsize=3)
+ax.scatter(lit_tp, egnn_cal, color="tab:blue", s=70, edgecolors="k",
+           label="EGNN LOOCV-calibrated", zorder=5)
+lims = [min(lit_tp.min(), egnn_cal.min()) - 5, max(lit_tp.max(), egnn_raw.max()) + 5]
+ax.plot(lims, lims, "k--", lw=1, label="y = x (perfect prediction)")
+for i, n in enumerate(names):
+    ax.annotate(n, (lit_tp[i], egnn_cal[i]), fontsize=7,
+                xytext=(3, 3), textcoords="offset points")
+ax.set_xlabel("Actual Tp (°C, literature)")
+ax.set_ylabel("Predicted Tp (°C)")
+ax.set_title("Actual vs Predicted Tp\n(raw shows the zero-shot offset; calibrated is honest LOOCV)")
+ax.legend(fontsize=8, loc="upper left")
+ax.grid(alpha=0.3)
+
+# (b) Bar chart of calibrated error per sample
+ax2 = axes[1]
+colors = ["tab:red" if abs(e) > 10 else "tab:green" for e in err_abs]
+bars = ax2.bar(range(len(names)), err_abs, color=colors, edgecolor="k", alpha=0.85)
+ax2.axhline(0, color="k", lw=1)
+ax2.axhline(10, color="gray", ls="--", lw=1, label="±10 °C tolerance")
+ax2.axhline(-10, color="gray", ls="--", lw=1)
+ax2.set_ylabel("Calibrated prediction error (°C)")
+ax2.set_title("Per-sample calibrated error (LOOCV)")
+ax2.set_xticks(range(len(names)))
+ax2.set_xticklabels(names, rotation=45, ha="right")
+ax2.legend(fontsize=8)
+ax2.grid(alpha=0.3, axis="y")
+
+plt.tight_layout()
+plt.savefig("tp_actual_vs_predicted.png", dpi=150, bbox_inches="tight")
+plt.show()
+print("\nSaved plot to tp_actual_vs_predicted.png")
